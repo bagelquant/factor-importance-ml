@@ -1,0 +1,10 @@
+# python==3.12.7
+tensorflow
+numpy
+pandas
+scikit-learn
+matplotlib
+seaborn
+jupyterlab
+xgboost
+lightgbm
