@@ -7,13 +7,13 @@ This document outlines the structure of the modules used in the machine learning
 Here is an overview of the data pipeline, the whole logic of the project
 
 1. load raw data -> `src/data_loader.py`
-2. preprocess data -> `src/preprocessor.py`
+2. preprocess data -> `src/preprocessor.py`  -> Thara
   - standardization
   - missing value handling
   - categorical encoding
-3. feature engineering -> `src/feature_engineer.py`
+3. feature engineering -> `src/feature_engineer.py`  -> Yanzhong
   - adding new features (e.g., peer group statistics)
-4. data splitting -> `src/data_splitter.py`
+4. data splitting -> `src/data_splitter.py` -> Sravya
   - train-test split
   - cross-validation setup
 5. models, definitions of models -> `src/models/`
