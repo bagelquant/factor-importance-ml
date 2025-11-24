@@ -17,6 +17,10 @@ Professor believe our project is too ambitious for the given timeframe, need to 
 
 ## Phase 3 Module Development
 
+- [X] Data Loader Module
+- [X] Preprocessing Module
+- [X] Feature Engineering Module
+
 ## Phase 4 Model training
 
 ## Phase 5 Evaluation

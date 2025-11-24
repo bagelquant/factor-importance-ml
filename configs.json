@@ -1,0 +1,6 @@
+{
+    "file_path": {
+        "raw_data": "data/raw/OpenAP_Macro.parquet.gzip",
+        "processed_data": "data/processed/processed_data.parquet.gzip"
+    }
+}
