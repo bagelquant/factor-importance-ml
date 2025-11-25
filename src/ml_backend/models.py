@@ -23,6 +23,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import mean_squared_error
 from typing import Any, cast
+import keras  # standalone keras package
+from keras import layers
 
 import lightgbm as lgb  # type: ignore
 
@@ -63,6 +65,7 @@ GBT_HYPERPARAMS = hyper_params.get("GradientTreeBoosting", {})
 NN_HYPERPARAMS = hyper_params.get("NeuralNetwork", {})
 NN_EMBEDDING_HYPERPARAMS = NN_HYPERPARAMS.copy()
 NN_EMBEDDING_HYPERPARAMS.update(hyper_params.get("NeuralNetworkWithEmbeddings", {}))
+NN_TRAINING = hyper_params.get("NeuralNetworkTraining", {})
 
 
 @dataclass(slots=True)
@@ -193,14 +196,14 @@ class ElasticNet(BaseModel):
             pipeline = make_pipeline(StandardScaler(), enet)
 
             try:
-                pipeline.fit(X_train.values, y_train.values)
+                pipeline.fit(X_train.to_numpy(), y_train.to_numpy())
             except Exception as exc:
                 # If a particular parameter combination fails, skip it
                 print(f"Skipping params {params} due to error: {exc}")
                 continue
 
-            preds = pipeline.predict(X_val.values)
-            mse = mean_squared_error(y_val.values, preds)  # type: ignore
+            preds = pipeline.predict(X_val.to_numpy())
+            mse = mean_squared_error(y_val.to_numpy(), preds)
 
             if mse < best_mse:
                 best_mse = mse
@@ -253,7 +256,7 @@ class ElasticNet(BaseModel):
 
         enet = SkElasticNet(random_state=RANDOM_SEED, **enet_kwargs)
         pipeline = make_pipeline(StandardScaler(), enet)
-        pipeline.fit(X.values, y.values)
+        pipeline.fit(X.to_numpy(), y.to_numpy())
 
         # Save fitted model and params
         self.model = pipeline
@@ -280,7 +283,7 @@ class ElasticNet(BaseModel):
         predict_fn = getattr(self.model, "predict", None)
         if predict_fn is None:
             raise RuntimeError("Trained model does not expose a 'predict' method.")
-        preds = predict_fn(X_test.values)
+        preds = predict_fn(X_test.to_numpy())
         return pd.Series(preds, index=self.test_df.index, name=f"{self.target_col}_pred")
 
 
@@ -334,15 +337,14 @@ class GradientBoostingTree(BaseModel):
 
             try:
                 model = self._build_gbt_model(params)
-                # Use LightGBM early stopping against the validation set to speedup tuning
                 # Simple fit without early stopping (removed per project preference)
-                cast(Any, model).fit(X_train.values, y_train.values)
+                cast(Any, model).fit(X_train.to_numpy(), y_train.to_numpy())
             except Exception as exc:
                 print(f"Skipping params {params} due to error: {exc}")
                 continue
 
-            preds = cast(Any, model).predict(X_val.values)
-            mse = mean_squared_error(cast(Any, y_val.values), cast(Any, preds))
+            preds = cast(Any, model).predict(X_val.to_numpy())
+            mse = mean_squared_error(y_val.to_numpy(), preds)
 
             if mse < best_mse:
                 best_mse = mse
@@ -371,7 +373,7 @@ class GradientBoostingTree(BaseModel):
             params = {k: (v if not isinstance(v, list) else v[0]) for k, v in self.hyperparams.items()}
 
         model = self._build_gbt_model(params)
-        cast(Any, model).fit(X.values, y.values)
+        cast(Any, model).fit(X.to_numpy(), y.to_numpy())
 
         self.model = model
         self.tuned_params = params
@@ -388,26 +390,137 @@ class GradientBoostingTree(BaseModel):
         predict_fn = getattr(self.model, "predict", None)
         if predict_fn is None:
             raise RuntimeError("Trained model does not expose a 'predict' method.")
-        preds = predict_fn(X_test.values)
+        preds = predict_fn(X_test.to_numpy())
         return pd.Series(preds, index=self.test_df.index, name=f"{self.target_col}_pred")
 
 
 @dataclass(slots=True)
 class NeuralNetwork(BaseModel):
-
     hyperparams: dict[str, list] = field(default_factory=lambda: NN_HYPERPARAMS)
+    feature_columns: list = field(init=False, repr=False, default_factory=list)
+
+    def _build_keras_model(self, input_dim: int, params: dict) -> "keras.Model":
+        # Build a simple feed-forward network according to params
+        hidden_layers = int(params.get("hidden_layers", 1))
+        neurons = int(params.get("neurons_per_layer", 32))
+        activation = params.get("activation_functions", "relu")
+        lr = float(params.get("learning_rates", 0.001))
+
+        model = keras.Sequential()
+        model.add(keras.Input(shape=(input_dim,)))
+        for _ in range(hidden_layers):
+            model.add(layers.Dense(neurons, activation=activation))
+        model.add(layers.Dense(1, activation="linear"))
+        model.compile(optimizer=cast(Any, keras.optimizers.Adam(learning_rate=lr)), loss="mse")
+        return model
+
+    # sklearn fallback removed; we assume standalone Keras is installed and used.
 
     def auto_tune(self) -> None:
-        # Implement auto-tuning logic for Neural Network
-        raise NotImplementedError("Auto-tuning not implemented for NeuralNetwork yet.")
+        """
+        Simple grid-search over provided hyperparameters. Uses a small number
+        of epochs for Keras tuning to keep tuning quick.
+        """
+        X_train = self.train_df.drop(columns=[self.target_col]).copy()
+        y_train = self.train_df[self.target_col]
+        X_val = self.val_df.drop(columns=[self.target_col]).copy()
+        y_val = self.val_df[self.target_col]
+
+        self.feature_columns = X_train.columns.tolist()
+
+        param_keys = list(self.hyperparams.keys())
+        param_values = [self.hyperparams[k] for k in param_keys]
+
+        best_mse = float("inf")
+        best_params: dict[str, Any] = {}
+        best_model = None
+
+        # tuning epochs: if epochs present in hyperparams and is an int/list, pick small value for tuning
+        tuning_epochs = 5
+        if "epochs" in self.hyperparams:
+            ep = self.hyperparams.get("epochs")
+            if isinstance(ep, list) and len(ep) > 0:
+                tuning_epochs = min(5, int(ep[0]))
+            elif isinstance(ep, int):
+                tuning_epochs = min(5, ep)
+
+        for vals in product(*param_values):
+            params = dict(zip(param_keys, vals))
+            print(f"Trying NeuralNetwork params: {params}")
+
+            try:
+                model = self._build_keras_model(X_train.shape[1], params)
+                batch_size = int(cast(Any, params.get("batch_sizes", 32)))
+                model.fit(X_train.to_numpy(), y_train.to_numpy(), epochs=tuning_epochs, batch_size=batch_size, verbose=cast(Any, 0))
+                preds = model.predict(X_val.to_numpy()).ravel()
+            except Exception as exc:
+                print(f"Skipping params {params} due to error: {exc}")
+                continue
+
+            mse = mean_squared_error(y_val.to_numpy(), preds)
+            if mse < best_mse:
+                best_mse = mse
+                best_params = params
+                best_model = model
+
+        if best_model is None:
+            raise RuntimeError("Failed to fit any NeuralNetwork models during tuning.")
+
+        self.tuned_params = best_params
+        self.model = best_model
+        print(f"NeuralNetwork tuning complete. Best MSE={best_mse:.6f}, params={best_params}")
 
     def train_final(self) -> None:
-        # Implement final training logic for Neural Network
-        raise NotImplementedError("Final training not implemented for NeuralNetwork yet.")
+        # Train final NN on train + val using tuned params (or defaults)
+        combined = pd.concat([self.train_df, self.val_df], axis=0)
+        X = combined.drop(columns=[self.target_col]).copy()
+        y = combined[self.target_col]
+
+        self.feature_columns = X.columns.tolist()
+
+        if getattr(self, "tuned_params", None):
+            params = self.tuned_params
+        else:
+            params = {k: (v if not isinstance(v, list) else v[0]) for k, v in self.hyperparams.items()}
+
+        # Determine epochs: prefer explicit param if present, otherwise use NN_TRAINING final_epochs
+        if "epochs" in params:
+            try:
+                epochs = int(params["epochs"])  # type: ignore
+            except Exception:
+                epochs = int(cast(Any, NN_TRAINING.get("final_epochs", 100)))
+        else:
+            epochs = int(cast(Any, NN_TRAINING.get("final_epochs", 100)))
+
+        batch_size = int(cast(Any, params.get("batch_sizes", 32)))
+        model = self._build_keras_model(X.shape[1], params)
+
+        # Optionally use early stopping with validation on the provided val_df
+        use_es = bool(NN_TRAINING.get("use_early_stopping", False))
+        if use_es:
+            patience = int(cast(Any, NN_TRAINING.get("early_stopping_patience", 10)))
+            callbacks = [keras.callbacks.EarlyStopping(monitor="val_loss", patience=patience, restore_best_weights=True)]
+            # Use val_df as validation_data (it's okay if val_df is also part of combined)
+            X_val = self.val_df.drop(columns=[self.target_col]).copy()
+            y_val = self.val_df[self.target_col]
+            model.fit(X.to_numpy(), y.to_numpy(), epochs=epochs, batch_size=batch_size, verbose=cast(Any, 0), validation_data=(X_val.to_numpy(), y_val.to_numpy()), callbacks=callbacks)
+        else:
+            model.fit(X.to_numpy(), y.to_numpy(), epochs=epochs, batch_size=batch_size, verbose=cast(Any, 0))
+
+        self.model = model
+        self.tuned_params = params
+        print(f"NeuralNetwork final training complete. Params={params}")
 
     def predict(self) -> pd.Series:
-        # Implement prediction logic for Neural Network
-        raise NotImplementedError("Prediction not implemented for NeuralNetwork yet.")
+        if getattr(self, "model", None) is None:
+            raise RuntimeError("Model is not trained. Call `train_final()` or `auto_tune()` first.")
+
+        X_test = self.test_df.drop(columns=[self.target_col]).copy()
+        if getattr(self, "feature_columns", None):
+            X_test = X_test.reindex(columns=self.feature_columns)
+
+        preds = cast(Any, self.model).predict(X_test.to_numpy()).ravel()
+        return pd.Series(preds, index=self.test_df.index, name=f"{self.target_col}_pred")
 
 
 @dataclass(slots=True)

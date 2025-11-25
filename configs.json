@@ -21,7 +21,12 @@
         "learning_rates": [0.001, 0.01, 0.1],
         "batch_sizes": [16, 32, 64, 128]
         },
-    "NeuralNetworkWithEmbedding": {
+    "NeuralNetworkTraining": {
+        "final_epochs": 100,
+        "use_early_stopping": true,
+        "early_stopping_patience": 10
+        },
+    "NeuralNetworkWithEmbeddings": {
         "embedding_dims": [4, 8, 16, 32]
         }
     }

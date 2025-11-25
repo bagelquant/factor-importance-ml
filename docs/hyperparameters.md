@@ -2,7 +2,7 @@
 
 The hyperparameters for the model training and evaluation are defined in the following sections.
 
-> Change `config.json` hyperparameters section accordingly if needed.
+> Change `configs.json` hyperparameters section accordingly if needed.
 
 ## Random seed
 
@@ -30,29 +30,28 @@ The hyperparameters for the model training and evaluation are defined in the fol
   - Type: float
   - Value: 1e-4
 
-## Gradient Tree Booosting Hyperparameters
+## Gradient Tree Boosting Hyperparameters
 
 - `n_leaves` (tune)
   - Description: The maximum number of leaves in one tree.
   - Type: int
   - Values: [3, 7, 15, 31, 63]
-- `depth` (fixed)
-  - Description: The maximum depth of each tree. Based on n_leaves.
+- `depth` (recommended)
+  - Description: The maximum depth of each tree. Use in conjunction with `n_leaves` to control tree complexity.
   - Type: int
-  - Values: [2, 3, 4, 5, 6] accordingly to n_leaves
-- `learning_rate_lambda` (fixed)
+  - Example values: [2, 3, 4, 5, 6]
+- `learning_rate_lambda` (tune)
   - Description: The learning rate shrinks the contribution of each tree by `learning_rate_lambda`. There is a trade-off between learning_rate_lambda and n_estimators.
   - Type: float
-  - Value: 0.01
-- `n_estimators` (fixed)
-  - Description: The number of boosting stages to be run. (trees), will use early stopping.
+  - Example values: [0.01]
+- `n_estimators` (tune)
+  - Description: The number of boosting stages to be run (trees).
   - Type: int
-  - Value: 5000
-- `column_sample_rate` (fixed)
+  - Example value: 5000 (use smaller values for quick experiments)
+- `column_sample_rate` (tune)
   - Description: The fraction of columns to be randomly sampled for each tree.
   - Type: float
-  - Value: sqrt(number of features) / number of features
-
+  - Example heuristic: sqrt(number of features) / number of features
 
 ## Neural Network Hyperparameters
 
@@ -64,22 +63,29 @@ The hyperparameters for the model training and evaluation are defined in the fol
   - Description: The number of neurons in each hidden layer.
   - Type: int
   - Values: [16, 32, 64, 128, 256]
-- `activation_function` (tune)
+- `activation_functions` (tune)
   - Description: The activation function to use in the hidden layers.
   - Type: str
   - Values: ['relu', 'tanh', 'sigmoid']
-- `learning_rate` (tune)
+- `learning_rates` (tune)
   - Description: The learning rate for the optimizer.
   - Type: float
   - Values: [0.001, 0.01, 0.1]
-- `batch_size` (tune)
+`batch_sizes` (tune)
   - Description: The number of samples per gradient update.
   - Type: int
   - Values: [16, 32, 64, 128]
-- `epochs` (fixed)
-  - Description: The number of epochs to train the model.
-  - Type: int
-  - Value: 1000
+
+- `training` (fixed)
+  - `final_epochs`: The default number of epochs to run for final training (when not using early stopping).
+    - Type: int
+    - Example value: 100
+  - `use_early_stopping`: Whether to enable early stopping during final training.
+    - Type: bool
+    - Example value: true
+  - `early_stopping_patience`: Number of epochs with no improvement on validation to wait before stopping.
+    - Type: int
+    - Example value: 10
 
 ## Neural Network with Embeddings Hyperparameters
 
