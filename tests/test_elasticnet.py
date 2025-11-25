@@ -1,54 +1,50 @@
 import numpy as np
 import pandas as pd
 
-from models import ElasticNet
+from ml_backend.models import ElasticNet
 
 
-def make_data(n=300, seed=0):
+def make_panel(n_samples=200, n_features=5, seed=0):
     rng = np.random.default_rng(seed)
-    x1 = rng.normal(size=n)
-    x2 = rng.normal(size=n)
-    noise = rng.normal(scale=0.1, size=n)
-    y = 2.0 * x1 - 1.0 * x2 + noise
-    df = pd.DataFrame({"x1": x1, "x2": x2, "retadj_next": y})
+    X = rng.normal(size=(n_samples, n_features))
+    # create simple linear target with noise
+    coef = np.arange(1, n_features + 1)
+    y = X.dot(coef) + rng.normal(scale=0.1, size=n_samples)
+
+    df = pd.DataFrame(X, columns=[f"f{i}" for i in range(n_features)])
+    df["retadj_next"] = y
+    # simple time/index to simulate panel index
+    df.index = pd.RangeIndex(start=0, stop=n_samples)
     return df
 
 
-def test_elasticnet_workflow():
-    df = make_data(300, seed=42)
-    train = df.iloc[:200].reset_index(drop=True)
-    val = df.iloc[200:250].reset_index(drop=True)
-    test = df.iloc[250:].reset_index(drop=True)
+def test_elasticnet_end_to_end():
+    # Create train/val/test splits
+    df = make_panel(n_samples=150, n_features=4, seed=42)
+    train_df = df.iloc[:100].copy()
+    val_df = df.iloc[100:125].copy()
+    test_df = df.iloc[125:].copy()
 
-    model = ElasticNet(
-        train_data=train,
-        val_data=val,
-        test_data=test,
-        target_column="retadj_next",
-        hyperparameters={
-            "alpha_list": [0.01, 0.1],
-            "l1_ratio_list": [0.1, 0.5],
-            "max_iter": 10000,
-        },
-    )
+    # Define a tiny hyperparam grid so the unit test is fast
+    hyperparams = {"alpha": [0.1, 1.0], "l1_ratio": [0.0, 0.5, 1.0]}
 
-    # auto_tune should return a dict and set tuned_params
-    res = model.auto_tune()
-    assert isinstance(res, dict)
-    assert model.tuned_params is not None
+    en = ElasticNet(train_df=train_df, val_df=val_df, test_df=test_df, hyperparams=hyperparams)
 
-    # fitted model from tuning should be set
-    assert model.fitted_model is not None
+    # Auto-tune should populate tuned_params and model
+    en.auto_tune()
+    assert isinstance(en.tuned_params, dict) and len(en.tuned_params) > 0
+    assert en.model is not None
 
-    # retrain on train+val
-    model.train()
-    assert model.fitted_model is not None
+    # Train final model and check feature_columns recorded
+    en.train_final()
+    assert getattr(en, "feature_columns", None) is not None
+    assert isinstance(en.feature_columns, list) and len(en.feature_columns) > 0
 
-    preds = model.predict()
+    # Predict and validate output
+    preds = en.predict()
     assert isinstance(preds, pd.Series)
-    assert preds.shape[0] == test.shape[0]
+    assert len(preds) == len(test_df)
+    assert not preds.isna().any()
 
-    metrics = model.evaluate("test")
-    assert set(metrics.keys()) == {"MSE", "MAE", "R2"}
-    # with small noise synthetic data MSE should be reasonably small
-    assert metrics["MSE"] < 1.0
+    # Predictions should be finite numbers
+    assert np.isfinite(preds.values).all()

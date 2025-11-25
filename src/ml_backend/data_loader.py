@@ -19,13 +19,30 @@ import pandas as pd
 from .preprocessor import preprocess
 
 
-# config path locate in root directory
-CONFIG_PATH = Path(__file__).parent.parent / "configs.json"
+__all__ = ["load_raw", "load_processed"]
+
+# Locate `configs.json` by searching upward from this module so a repo-root
+# `configs.json` (e.g. `/.../ml_project/configs.json`) is found even when the
+# package lives under `src/`.
+CURRENT_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = None
+for p in (CURRENT_DIR, *CURRENT_DIR.parents):
+    candidate = p / "configs.json"
+    if candidate.exists():
+        CONFIG_PATH = candidate
+        break
+
+if CONFIG_PATH is None:
+    raise FileNotFoundError(
+        f"configs.json not found when searching from {CURRENT_DIR}.\n"
+        "Please place a `configs.json` in the repository root or set the "
+        "environment to locate it."
+    )
 
 
 def _get_raw_data_path() -> Path:
     """Get the path to the raw data directory."""
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r") as f:  # type: ignore
         config = json.load(f)["file_path"]
     raw_data_path = Path(config["raw_data"])
     return raw_data_path
@@ -59,7 +76,7 @@ def load_raw(file_path: Path=_get_raw_data_path()) -> pd.DataFrame:
 
 def _get_processed_data_path() -> Path:
     """Get the path to the processed data directory."""
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r") as f:  # type: ignore
         config = json.load(f)["file_path"]
     processed_data_path = Path(config["processed_data"])
     return processed_data_path
