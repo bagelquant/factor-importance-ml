@@ -87,6 +87,12 @@ if _TF_AVAILABLE:
                 mixed_precision.set_global_policy("mixed_float16")
             except Exception:
                 pass
+        # Optionally enable XLA (JIT) to improve kernel fusion/throughput on some workloads
+        if bool(NN_TRAINING.get("enable_xla", False)):
+            try:
+                cast(Any, tf).config.optimizer.set_jit(True)
+            except Exception:
+                pass
 
         # Tune threading to match available cores (user can override in config)
         cpu_count = os.cpu_count() or 1
@@ -512,7 +518,24 @@ class NeuralNetwork(BaseModel):
                     try:
                         train_ds = cast(Any, tf).data.Dataset.from_tensor_slices((X_train, y_train))
                         train_ds = train_ds.cache().shuffle(1024).batch(batch_size).prefetch(cast(Any, tf).data.AUTOTUNE)
+
+                        # allow non-deterministic execution and other dataset-level optimizations
+                        try:
+                            options = cast(Any, tf).data.Options()
+                            # allow parallelized map/processing and non-deterministic order for speed
+                            options.experimental_deterministic = False
+                            train_ds = train_ds.with_options(options)
+                        except Exception:
+                            pass
+
                         val_ds = cast(Any, tf).data.Dataset.from_tensor_slices((X_val, y_val)).batch(batch_size).prefetch(cast(Any, tf).data.AUTOTUNE)
+                        try:
+                            options = cast(Any, tf).data.Options()
+                            options.experimental_deterministic = False
+                            val_ds = val_ds.with_options(options)
+                        except Exception:
+                            pass
+
                         history = model.fit(train_ds, validation_data=val_ds, epochs=tuning_epochs, callbacks=callbacks, verbose=cast(Any, 0))
                     except Exception:
                         history = model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=tuning_epochs, batch_size=batch_size, callbacks=callbacks, verbose=cast(Any, 0))
@@ -541,7 +564,23 @@ class NeuralNetwork(BaseModel):
         if isinstance(pruner_name, str) and pruner_name.lower() == "median":
             pruner = optuna.pruners.MedianPruner(n_warmup_steps=int(NN_TRAINING.get("pruner_warmup", 1)))
 
-        study = optuna.create_study(direction="minimize", pruner=pruner, sampler=optuna.samplers.TPESampler(seed=int(RANDOM_SEED)))
+        # Decide sampler: use GridSampler when hyperparameter space is a small discrete grid
+        # Build a categorical grid dict from self.hyperparams (ensure lists)
+        grid_space: dict[str, list] = {}
+        for k, v in self.hyperparams.items():
+            grid_space[k] = v if isinstance(v, list) else [v]
+
+        total_combinations = 1
+        for opts in grid_space.values():
+            total_combinations *= max(1, len(opts))
+
+        max_grid = int(NN_TRAINING.get("max_grid_combinations", 2000))
+        if total_combinations <= max_grid:
+            sampler = optuna.samplers.GridSampler(grid_space)
+        else:
+            sampler = optuna.samplers.RandomSampler(seed=int(RANDOM_SEED))
+
+        study = optuna.create_study(direction="minimize", pruner=pruner, sampler=sampler)
         study.optimize(objective, n_trials=n_trials)
 
         if best_model is None:
@@ -628,7 +667,6 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         permno_input = keras.Input(shape=(1,), dtype="int32", name="permno_input")
         embed = layers.Embedding(input_dim=n_permnos, output_dim=embedding_dim, input_length=1)(permno_input)
         embed = layers.Flatten()(embed)
-
         x = layers.Concatenate()([numeric_input, embed])
         for _ in range(hidden_layers):
             x = layers.Dense(neurons, activation=activation)(x)
@@ -717,7 +755,23 @@ class NeuralNetworkWithEmbeddings(BaseModel):
                     try:
                         train_ds = cast(Any, tf).data.Dataset.from_tensor_slices(((X_train_num, p_train), y_train.to_numpy()))
                         train_ds = train_ds.cache().shuffle(1024).batch(batch_size).prefetch(cast(Any, tf).data.AUTOTUNE)
+
+                        # allow non-deterministic execution and other dataset-level optimizations
+                        try:
+                            options = cast(Any, tf).data.Options()
+                            options.experimental_deterministic = False
+                            train_ds = train_ds.with_options(options)
+                        except Exception:
+                            pass
+
                         val_ds = cast(Any, tf).data.Dataset.from_tensor_slices(((X_val_num, p_val), y_val.to_numpy())).batch(batch_size).prefetch(cast(Any, tf).data.AUTOTUNE)
+                        try:
+                            options = cast(Any, tf).data.Options()
+                            options.experimental_deterministic = False
+                            val_ds = val_ds.with_options(options)
+                        except Exception:
+                            pass
+
                         history = model.fit(train_ds, validation_data=val_ds, epochs=tuning_epochs, callbacks=callbacks, verbose=cast(Any, 0))
                     except Exception:
                         history = model.fit([X_train_num, p_train], y_train.to_numpy(), validation_data=([X_val_num, p_val], y_val.to_numpy()), epochs=tuning_epochs, batch_size=batch_size, callbacks=callbacks, verbose=cast(Any, 0))
@@ -745,7 +799,22 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         if isinstance(pruner_name, str) and pruner_name.lower() == "median":
             pruner = optuna.pruners.MedianPruner(n_warmup_steps=int(NN_TRAINING.get("pruner_warmup", 1)))
 
-        study = optuna.create_study(direction="minimize", pruner=pruner, sampler=optuna.samplers.TPESampler(seed=int(RANDOM_SEED)))
+        # Decide sampler: use GridSampler when hyperparameter space is a small discrete grid
+        grid_space: dict[str, list] = {}
+        for k, v in self.hyperparams.items():
+            grid_space[k] = v if isinstance(v, list) else [v]
+
+        total_combinations = 1
+        for opts in grid_space.values():
+            total_combinations *= max(1, len(opts))
+
+        max_grid = int(NN_TRAINING.get("max_grid_combinations", 2000))
+        if total_combinations <= max_grid:
+            sampler = optuna.samplers.GridSampler(grid_space)
+        else:
+            sampler = optuna.samplers.RandomSampler(seed=int(RANDOM_SEED))
+
+        study = optuna.create_study(direction="minimize", pruner=pruner, sampler=sampler)
         study.optimize(objective, n_trials=n_trials)
 
         if best_model is None:

@@ -15,14 +15,14 @@
         "n_leaves": [3, 7, 15, 31, 63]
         },
     "NeuralNetwork": {
-        "hidden_layers": [1, 2, 3, 4, 5],
-        "neurons_per_layer": [16, 32, 64, 128, 256],
-        "activation_functions": ["relu", "tanh", "sigmoid"],
-        "learning_rates": [0.001, 0.01, 0.1],
-        "batch_sizes": [16, 32, 64, 128]
+        "hidden_layers": [2, 3, 4],
+        "neurons_per_layer": [16, 32],
+        "activation_functions": ["relu"],
+        "learning_rates": [0.001],
+        "batch_sizes": [1024]
         },
     "NeuralNetworkTraining": {
-        "final_epochs": 100,
+        "final_epochs": 50,
         "use_early_stopping": true,
         "early_stopping_patience": 10,
         "# Tuning (Optuna) settings": "These control Optuna tuning behavior for NeuralNetwork classes",
@@ -37,13 +37,13 @@
         "inter_op_threads": 2
         },
     "NeuralNetworkWithEmbeddings": {
-        "embedding_dims": [4, 8]
+        "embedding_dims": [8]
         }
     },
     "train_iteration": {
-        "train_start": 2010,
-        "val_start": 2013,
-        "val_years": 2,
+        "train_start": 2000,
+        "val_start": 2006,
+        "val_years": 3,
         "test_years": 1,
         "test_end": 2020
     }
