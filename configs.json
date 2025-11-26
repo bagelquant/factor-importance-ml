@@ -18,8 +18,8 @@
         "hidden_layers": [2, 3, 4],
         "neurons_per_layer": [16, 32],
         "activation_functions": ["relu"],
-        "learning_rates": [0.001],
-        "batch_sizes": [1024]
+        "learning_rates": [0.01],
+        "batch_sizes": [2048]
         },
     "NeuralNetworkTraining": {
         "final_epochs": 50,

@@ -888,36 +888,25 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         preds = cast(Any, self.model).predict([X_test.to_numpy(), p_test]).ravel()
         return pd.Series(preds, index=self.test_df.index, name=f"{self.target_col}_pred")
 
-    def distance_weighted_feature(self, col_name: str, df: Optional[pd.DataFrame] = None, bandwidth: Optional[float] = None) -> pd.Series:
-        """Compute cross-sectional peer-weighted feature per date using embedding similarity.
+    def distance_weighted_feature(self, bandwidth: Optional[float] = None) -> pd.DataFrame:
+        """Compute peer-weighted features for the combined train+val set.
 
-        For each date t and firm i present in `df` (or `self.test_df` by default):
-          - compute distances between i's embedding and all other firms j at date t
-          - form Gaussian weights w_ij = exp(-d_ij^2 / (2*bandwidth^2)), set w_ii = 0
-          - normalize weights so sum_j w_ij = 1
-          - compute peer feature for i as sum_j w_ij * q_{j,t}
+        - Uses `train_df` + `val_df` concatenated as the input DataFrame.
+        - Computes peer-weighted averages for all numeric columns (excluding
+          the target column) per cross-section date using embedding similarities.
+        - Operates per-date with vectorized matrix operations for efficiency.
 
-        Parameters
-        ----------
-        col_name: str
-            Column name present in `df` whose cross-sectional peer-weighted
-            average will be computed (q_{j,t}).
-        df: Optional[pd.DataFrame]
-            DataFrame to compute peer features on. If None, uses `self.test_df`.
-        bandwidth: Optional[float]
-            If provided, uses this value as the Gaussian kernel bandwidth; otherwise
-            uses the median of non-zero pairwise distances per date (fallback 1.0).
-
-        Returns
-        -------
-        pd.Series
-            Series indexed like `df.index` containing the peer-weighted feature,
-            named `peer_feat_{col_name}`. If a firm has no peers on a date, value is NaN.
+        Returns a DataFrame with the same index and columns as the input (numeric
+        columns replaced by their peer-weighted values; non-numeric columns are
+        copied through).
         """
         if getattr(self, "model", None) is None:
             raise RuntimeError("Model is not trained. Call `train_final()` or `auto_tune()` first.")
 
-        if df is None:
+        # Build the DataFrame from train + val (preferred) or fallback to test
+        try:
+            df = pd.concat([self.train_df, self.val_df], axis=0)
+        except Exception:
             df = self.test_df
 
         # find embedding layer
@@ -932,65 +921,71 @@ class NeuralNetworkWithEmbeddings(BaseModel):
 
         emb_weights = emb_layer.get_weights()[0]  # (n_permnos, emb_dim)
 
-        # ensure column exists
-        if col_name not in df.columns:
-            raise ValueError(f"Column '{col_name}' not found in DataFrame.")
+        # select numeric columns (exclude target)
+        exclude = {self.target_col}
+        numeric_cols = [c for c in df.columns if c not in exclude and pd.api.types.is_numeric_dtype(df[c])]
+        if not numeric_cols:
+            raise ValueError("No numeric columns found in train+val to compute peer features.")
 
         # extract date index for grouping (support MultiIndex with 'date' level or a 'date' column)
         if isinstance(df.index, pd.MultiIndex) and "date" in df.index.names:
             dates = df.index.get_level_values("date")
         elif "date" in df.columns:
-            dates = df["date"]
+            dates = df["date"].to_numpy()
         else:
             raise ValueError("DataFrame must contain a 'date' level in the index or a 'date' column for cross-sectional grouping.")
 
         permnos = self._get_permnos(df)
         mapped = np.array([self._permno_mapping.get(int(x), 0) for x in permnos])
 
-        q_vals_all = df[col_name].to_numpy(dtype=float)
-        n = len(df)
-        result = np.full(n, np.nan, dtype=float)
-
-        # operate date-by-date
         unique_dates = pd.Index(dates).unique()
+        n = len(df)
+        m_cols = len(numeric_cols)
+        result = np.full((n, m_cols), np.nan, dtype=float)
+
         for d in unique_dates:
-            mask = (dates == d)
+            # boolean mask for this date
+            if isinstance(d, np.ndarray):
+                mask = (dates == d)
+            else:
+                mask = (dates == d)
             idx = np.nonzero(mask)[0]
-            if idx.size == 0:
-                continue
-            if idx.size == 1:
-                result[idx[0]] = np.nan
+            k = idx.size
+            if k <= 1:
                 continue
 
-            emb_sub = emb_weights[mapped[idx]]  # shape (k, emb_dim)
-            # pairwise squared distances
+            emb_sub = emb_weights[mapped[idx]]  # (k, emb_dim)
             norms = np.sum(emb_sub * emb_sub, axis=1)
             D2 = norms[:, None] + norms[None, :] - 2.0 * (emb_sub @ emb_sub.T)
             D2 = np.maximum(D2, 0.0)
-            D = np.sqrt(D2)
 
             # choose bandwidth per date if not provided
             if bandwidth is None:
-                nonzero = D[D > 0]
-                bw = float(np.median(nonzero)) if nonzero.size > 0 else 1.0
+                nonzero = D2[D2 > 0]
+                bw = float(np.sqrt(np.median(nonzero))) if nonzero.size > 0 else 1.0
                 if bw == 0.0:
                     bw = 1.0
             else:
                 bw = float(bandwidth)
 
-            # Gaussian kernel
-            K = np.exp(- (D ** 2) / (2.0 * (bw ** 2)))
+            # Gaussian kernel from squared distances (avoid extra sqrt)
+            K = np.exp(- D2 / (2.0 * (bw ** 2)))
             np.fill_diagonal(K, 0.0)
 
             row_sums = K.sum(axis=1)
-            q_sub = q_vals_all[idx]
 
-            # compute weighted average for each row
-            for i_pos, global_i in enumerate(idx):
-                s = row_sums[i_pos]
-                if s > 0:
-                    result[global_i] = float(K[i_pos].dot(q_sub) / s)
-                else:
-                    result[global_i] = np.nan
+            q_sub_all = df.iloc[idx][numeric_cols].to_numpy(dtype=float)  # (k, m_cols)
 
-        return pd.Series(result, index=df.index, name=f"peer_feat_{col_name}")
+            # weighted sums: (k,k) @ (k,m_cols) -> (k,m_cols)
+            weighted = K @ q_sub_all
+
+            nonzero_mask = row_sums > 0
+            if nonzero_mask.any():
+                weighted[nonzero_mask] = weighted[nonzero_mask] / row_sums[nonzero_mask][:, None]
+
+            result[idx, :] = weighted
+
+        # construct output DataFrame preserving non-numeric columns
+        out_df = df.copy()
+        out_df[numeric_cols] = pd.DataFrame(result, index=df.index, columns=numeric_cols)
+        return out_df

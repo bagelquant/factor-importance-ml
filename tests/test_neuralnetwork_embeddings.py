@@ -63,11 +63,12 @@ def test_neuralnetwork_embeddings_basic_flow():
     # predictions should have the same index as test
     assert preds.index.equals(test.index)
 
-    # peer-weighted feature using embedding distances
-    peer = nn.distance_weighted_feature("retadj_next")
-    assert isinstance(peer, pd.Series)
-    assert peer.name == "peer_feat_retadj_next"
-    assert len(peer) == len(test)
-    assert peer.index.equals(test.index)
-    # expect at least one non-NaN value when cross-sections have >1 firm
-    assert peer.notna().any()
+    # peer-weighted features using embedding distances (new API: no args)
+    peer_df = nn.distance_weighted_feature()
+    assert isinstance(peer_df, pd.DataFrame)
+    # output index should correspond to train + val concatenation (we compute on train+val)
+    combined = pd.concat([train, val], axis=0)
+    assert peer_df.index.equals(combined.index)
+    # expect the target column to be present and have at least one non-NaN value
+    assert "retadj_next" in peer_df.columns
+    assert peer_df["retadj_next"].notna().any()
