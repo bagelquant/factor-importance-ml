@@ -784,30 +784,3 @@ class NeuralNetworkWithEmbeddings(BaseModel):
                     result[global_i] = np.nan
 
         return pd.Series(result, index=df.index, name=f"peer_feat_{col_name}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

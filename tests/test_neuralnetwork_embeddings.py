@@ -12,9 +12,14 @@ def make_panel_data(n_rows=100, n_features=5, seed=42):
     cols = [f"f{i}" for i in range(n_features)]
     df = pd.DataFrame(X, columns=cols)
     df["retadj_next"] = y
-    # create a simple panel index (date, permno)
-    dates = pd.date_range("2020-01-01", periods=n_rows, freq="D")
-    permnos = np.arange(n_rows) % 10
+    # create a panel index with multiple firms per date
+    num_permnos = 10
+    num_dates = max(1, n_rows // num_permnos)
+    dates = np.repeat(pd.date_range("2020-01-01", periods=num_dates, freq="D"), num_permnos)
+    permnos = np.tile(np.arange(num_permnos), num_dates)
+    # trim to requested length
+    dates = dates[:n_rows]
+    permnos = permnos[:n_rows]
     df.index = pd.MultiIndex.from_arrays([dates, permnos], names=("date", "permno"))
     return df
 
@@ -58,11 +63,11 @@ def test_neuralnetwork_embeddings_basic_flow():
     # predictions should have the same index as test
     assert preds.index.equals(test.index)
 
-    # distance_to_mean should return Euclidean distances per observation
-    dists = nn.distance_to_mean()
-    assert isinstance(dists, pd.Series)
-    assert dists.name == "distance_to_mean"
-    assert len(dists) == len(test)
-    assert dists.index.equals(test.index)
-    # distances should be non-negative
-    assert (dists.to_numpy() >= 0).all()
+    # peer-weighted feature using embedding distances
+    peer = nn.distance_weighted_feature("retadj_next")
+    assert isinstance(peer, pd.Series)
+    assert peer.name == "peer_feat_retadj_next"
+    assert len(peer) == len(test)
+    assert peer.index.equals(test.index)
+    # expect at least one non-NaN value when cross-sections have >1 firm
+    assert peer.notna().any()

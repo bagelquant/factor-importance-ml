@@ -29,5 +29,12 @@
     "NeuralNetworkWithEmbeddings": {
         "embedding_dims": [4, 8, 16, 32]
         }
+    },
+    "train_iteration": {
+        "train_start": 2000,
+        "val_start": 2005,
+        "val_years": 3,
+        "test_years": 1,
+        "test_end": 2020
     }
 }
