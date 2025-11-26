@@ -24,16 +24,26 @@
     "NeuralNetworkTraining": {
         "final_epochs": 100,
         "use_early_stopping": true,
-        "early_stopping_patience": 10
+        "early_stopping_patience": 10,
+        "# Tuning (Optuna) settings": "These control Optuna tuning behavior for NeuralNetwork classes",
+        "tuning_epochs": 5,
+        "tuning_trials": 20,
+        "pruner": "median",
+        "pruner_warmup": 1,
+        "# Performance / device settings": "Settings to improve performance on macOS Apple Silicon (M1/M2)",
+        "use_mixed_precision": true,
+        "use_metal": true,
+        "intra_op_threads": 4,
+        "inter_op_threads": 2
         },
     "NeuralNetworkWithEmbeddings": {
-        "embedding_dims": [4, 8, 16, 32]
+        "embedding_dims": [4, 8]
         }
     },
     "train_iteration": {
-        "train_start": 2000,
-        "val_start": 2005,
-        "val_years": 3,
+        "train_start": 2010,
+        "val_start": 2013,
+        "val_years": 2,
         "test_years": 1,
         "test_end": 2020
     }

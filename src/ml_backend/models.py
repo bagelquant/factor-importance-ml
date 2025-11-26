@@ -26,8 +26,17 @@ from sklearn.metrics import mean_squared_error
 from typing import Any, cast, Optional
 import keras  # standalone keras package
 from keras import layers
+import os
+
+_TF_AVAILABLE = False
+try:
+    import tensorflow as tf  # type: ignore
+    _TF_AVAILABLE = True
+except Exception:
+    tf = None  # type: ignore
 
 import lightgbm as lgb  # type: ignore
+import optuna
 
 
 __all__ = [
@@ -67,6 +76,30 @@ NN_HYPERPARAMS = hyper_params.get("NeuralNetwork", {})
 NN_EMBEDDING_HYPERPARAMS = NN_HYPERPARAMS.copy()
 NN_EMBEDDING_HYPERPARAMS.update(hyper_params.get("NeuralNetworkWithEmbeddings", {}))
 NN_TRAINING = hyper_params.get("NeuralNetworkTraining", {})
+
+# If TensorFlow is available, optionally enable mixed precision and tune threading
+if _TF_AVAILABLE:
+    try:
+        # Mixed precision can significantly speed up training on Apple Silicon
+        if bool(NN_TRAINING.get("use_mixed_precision", False)):
+            try:
+                from tensorflow.keras import mixed_precision  # type: ignore
+                mixed_precision.set_global_policy("mixed_float16")
+            except Exception:
+                pass
+
+        # Tune threading to match available cores (user can override in config)
+        cpu_count = os.cpu_count() or 1
+        intra = int(NN_TRAINING.get("intra_op_threads", max(1, cpu_count - 2)))
+        inter = int(NN_TRAINING.get("inter_op_threads", max(1, cpu_count // 2)))
+        try:
+            cast(Any, tf).config.threading.set_intra_op_parallelism_threads(intra)
+            cast(Any, tf).config.threading.set_inter_op_parallelism_threads(inter)
+        except Exception:
+            # not critical if we can't set threading options
+            pass
+    except Exception:
+        pass
 
 
 @dataclass(slots=True)
@@ -418,58 +451,105 @@ class NeuralNetwork(BaseModel):
     # sklearn fallback removed; we assume standalone Keras is installed and used.
 
     def auto_tune(self) -> None:
-        """
-        Simple grid-search over provided hyperparameters. Uses a small number
-        of epochs for Keras tuning to keep tuning quick.
-        """
-        X_train = self.train_df.drop(columns=[self.target_col]).copy()
-        y_train = self.train_df[self.target_col]
-        X_val = self.val_df.drop(columns=[self.target_col]).copy()
-        y_val = self.val_df[self.target_col]
+        # Prepare feature matrices and targets. Drop the target column.
+        X_train = self.train_df.drop(columns=[self.target_col]).to_numpy()
+        y_train = self.train_df[self.target_col].to_numpy()
+        X_val = self.val_df.drop(columns=[self.target_col]).to_numpy()
+        y_val = self.val_df[self.target_col].to_numpy()
 
-        self.feature_columns = X_train.columns.tolist()
+        self.feature_columns = self.train_df.drop(columns=[self.target_col]).columns.tolist()
 
-        param_keys = list(self.hyperparams.keys())
-        param_values = [self.hyperparams[k] for k in param_keys]
+        # tuning controls from config
+        tuning_epochs = int(cast(Any, NN_TRAINING.get("tuning_epochs", 5)))
+        n_trials = int(cast(Any, NN_TRAINING.get("tuning_trials", 20)))
+        pruner_name = NN_TRAINING.get("pruner", "median")
 
-        best_mse = float("inf")
+        best_loss = float("inf")
         best_params: dict[str, Any] = {}
         best_model = None
 
-        # tuning epochs: if epochs present in hyperparams and is an int/list, pick small value for tuning
-        tuning_epochs = 5
-        if "epochs" in self.hyperparams:
-            ep = self.hyperparams.get("epochs")
-            if isinstance(ep, list) and len(ep) > 0:
-                tuning_epochs = min(5, int(ep[0]))
-            elif isinstance(ep, int):
-                tuning_epochs = min(5, ep)
+        def objective(trial: optuna.trial.Trial) -> float:
+            nonlocal best_loss, best_params, best_model
 
-        for vals in product(*param_values):
-            params = dict(zip(param_keys, vals))
-            print(f"Trying NeuralNetwork params: {params}")
+            # sample params (categorical sampling from supplied lists)
+            params: dict[str, Any] = {}
+            for k, opts in self.hyperparams.items():
+                if isinstance(opts, list):
+                    params[k] = trial.suggest_categorical(k, opts)
+                else:
+                    params[k] = trial.suggest_categorical(k, [opts])
 
             try:
                 model = self._build_keras_model(X_train.shape[1], params)
                 batch_size = int(cast(Any, params.get("batch_sizes", 32)))
-                model.fit(X_train.to_numpy(), y_train.to_numpy(), epochs=tuning_epochs, batch_size=batch_size, verbose=cast(Any, 0))
-                preds = model.predict(X_val.to_numpy()).ravel()
-            except Exception as exc:
-                print(f"Skipping params {params} due to error: {exc}")
-                continue
 
-            mse = mean_squared_error(y_val.to_numpy(), preds)
-            if mse < best_mse:
-                best_mse = mse
+                callbacks = []
+                # Local pruning callback: report val metric each epoch and prune if requested
+                class _OptunaKerasPruningCallback(keras.callbacks.Callback):
+                    def __init__(self, trial: optuna.trial.Trial, monitor: str = "val_loss") -> None:
+                        super().__init__()
+                        self._trial = trial
+                        self._monitor = monitor
+
+                    def on_epoch_end(self, epoch, logs=None):
+                        logs = logs or {}
+                        if self._monitor not in logs:
+                            return
+                        val = logs.get(self._monitor)
+                        if val is None:
+                            return
+                        try:
+                            self._trial.report(float(val), step=epoch)
+                        except Exception:
+                            pass
+                        if self._trial.should_prune():
+                            raise optuna.TrialPruned()
+
+                callbacks.append(_OptunaKerasPruningCallback(trial, monitor="val_loss"))
+
+                # prefer tf.data pipelines on TF-enabled envs for better throughput
+                if _TF_AVAILABLE and getattr(tf, "data", None) is not None:
+                    try:
+                        train_ds = cast(Any, tf).data.Dataset.from_tensor_slices((X_train, y_train))
+                        train_ds = train_ds.cache().shuffle(1024).batch(batch_size).prefetch(cast(Any, tf).data.AUTOTUNE)
+                        val_ds = cast(Any, tf).data.Dataset.from_tensor_slices((X_val, y_val)).batch(batch_size).prefetch(cast(Any, tf).data.AUTOTUNE)
+                        history = model.fit(train_ds, validation_data=val_ds, epochs=tuning_epochs, callbacks=callbacks, verbose=cast(Any, 0))
+                    except Exception:
+                        history = model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=tuning_epochs, batch_size=batch_size, callbacks=callbacks, verbose=cast(Any, 0))
+                else:
+                    history = model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=tuning_epochs, batch_size=batch_size, callbacks=callbacks, verbose=cast(Any, 0))
+
+                val_loss = float(history.history.get("val_loss", [np.inf])[-1])
+            except optuna.TrialPruned:
+                raise
+            except Exception as exc:
+                # treat fit errors as pruned/failed trial
+                raise optuna.TrialPruned(f"fit-failed: {exc}")
+
+            trial.report(val_loss, step=len(history.history.get("loss", [])))
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+            if val_loss < best_loss:
+                best_loss = val_loss
                 best_params = params
                 best_model = model
+
+            return val_loss
+
+        pruner = None
+        if isinstance(pruner_name, str) and pruner_name.lower() == "median":
+            pruner = optuna.pruners.MedianPruner(n_warmup_steps=int(NN_TRAINING.get("pruner_warmup", 1)))
+
+        study = optuna.create_study(direction="minimize", pruner=pruner, sampler=optuna.samplers.TPESampler(seed=int(RANDOM_SEED)))
+        study.optimize(objective, n_trials=n_trials)
 
         if best_model is None:
             raise RuntimeError("Failed to fit any NeuralNetwork models during tuning.")
 
         self.tuned_params = best_params
         self.model = best_model
-        print(f"NeuralNetwork tuning complete. Best MSE={best_mse:.6f}, params={best_params}")
+        print(f"NeuralNetwork tuning complete. Best val_loss={best_loss:.6f}, params={best_params}")
 
     def train_final(self) -> None:
         # Train final NN on train + val using tuned params (or defaults)
@@ -558,9 +638,11 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         return model
 
     def auto_tune(self) -> None:
-        """
-        Grid-search over embedding dimensions and standard NN hyperparameters.
-        Uses `train_df` to fit and `val_df` to evaluate; keeps tuning epochs small.
+        """Use Optuna to tune embedding NN with pruning support.
+
+        Samples from `self.hyperparams` and uses a pruner similarly to
+        `NeuralNetwork.auto_tune`. The permno mapping is derived from the
+        training set and kept for final modeling.
         """
         X_train = self.train_df.drop(columns=[self.target_col]).copy()
         y_train = self.train_df[self.target_col]
@@ -571,7 +653,6 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         permnos_train = self._get_permnos(self.train_df)
         permnos_val = self._get_permnos(self.val_df)
 
-        # create mapping from permno -> id using train set
         unique_permnos = pd.Index(permnos_train.unique())
         self._permno_mapping = {int(p): i for i, p in enumerate(unique_permnos)}
 
@@ -583,39 +664,99 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         p_train = map_permno_array(permnos_train)
         p_val = map_permno_array(permnos_val)
 
-        param_keys = list(self.hyperparams.keys())
-        param_values = [self.hyperparams[k] for k in param_keys]
+        # tuning controls
+        tuning_epochs = int(cast(Any, NN_TRAINING.get("tuning_epochs", 3)))
+        n_trials = int(cast(Any, NN_TRAINING.get("tuning_trials", 20)))
+        pruner_name = NN_TRAINING.get("pruner", "median")
 
-        best_mse = float("inf")
+        best_loss = float("inf")
         best_params: dict[str, Any] = {}
         best_model = None
 
-        tuning_epochs = 3
+        def objective(trial: optuna.trial.Trial) -> float:
+            nonlocal best_loss, best_params, best_model
 
-        for vals in product(*param_values):
-            params = dict(zip(param_keys, vals))
+            params: dict[str, Any] = {}
+            for k, opts in self.hyperparams.items():
+                if isinstance(opts, list):
+                    params[k] = trial.suggest_categorical(k, opts)
+                else:
+                    params[k] = trial.suggest_categorical(k, [opts])
+
             try:
                 embedding_dim = int(cast(Any, params.get("embedding_dims", 8)))
                 model = self._build_embedding_model(X_train_num.shape[1], len(unique_permnos), embedding_dim, params)
                 batch_size = int(cast(Any, params.get("batch_sizes", 32)))
-                model.fit([X_train_num, p_train], y_train.to_numpy(), epochs=tuning_epochs, batch_size=batch_size, verbose=cast(Any, 0))
-                preds = model.predict([X_val_num, p_val]).ravel()
+
+                callbacks = []
+                # Local pruning callback for embedding model as well
+                class _OptunaKerasPruningCallback(keras.callbacks.Callback):
+                    def __init__(self, trial: optuna.trial.Trial, monitor: str = "val_loss") -> None:
+                        super().__init__()
+                        self._trial = trial
+                        self._monitor = monitor
+
+                    def on_epoch_end(self, epoch, logs=None):
+                        logs = logs or {}
+                        if self._monitor not in logs:
+                            return
+                        val = logs.get(self._monitor)
+                        if val is None:
+                            return
+                        try:
+                            self._trial.report(float(val), step=epoch)
+                        except Exception:
+                            pass
+                        if self._trial.should_prune():
+                            raise optuna.TrialPruned()
+
+                callbacks.append(_OptunaKerasPruningCallback(trial, monitor="val_loss"))
+
+                # use tf.data pipeline if TF is available for better throughput
+                if _TF_AVAILABLE and getattr(tf, "data", None) is not None:
+                    try:
+                        train_ds = cast(Any, tf).data.Dataset.from_tensor_slices(((X_train_num, p_train), y_train.to_numpy()))
+                        train_ds = train_ds.cache().shuffle(1024).batch(batch_size).prefetch(cast(Any, tf).data.AUTOTUNE)
+                        val_ds = cast(Any, tf).data.Dataset.from_tensor_slices(((X_val_num, p_val), y_val.to_numpy())).batch(batch_size).prefetch(cast(Any, tf).data.AUTOTUNE)
+                        history = model.fit(train_ds, validation_data=val_ds, epochs=tuning_epochs, callbacks=callbacks, verbose=cast(Any, 0))
+                    except Exception:
+                        history = model.fit([X_train_num, p_train], y_train.to_numpy(), validation_data=([X_val_num, p_val], y_val.to_numpy()), epochs=tuning_epochs, batch_size=batch_size, callbacks=callbacks, verbose=cast(Any, 0))
+                else:
+                    history = model.fit([X_train_num, p_train], y_train.to_numpy(), validation_data=([X_val_num, p_val], y_val.to_numpy()), epochs=tuning_epochs, batch_size=batch_size, callbacks=callbacks, verbose=cast(Any, 0))
+
+                val_loss = float(history.history.get("val_loss", [np.inf])[-1])
+            except optuna.TrialPruned:
+                raise
             except Exception as exc:
-                print(f"Skipping params {params} due to error: {exc}")
-                continue
-            mse = mean_squared_error(y_val.to_numpy(), preds)
-            if mse < best_mse:
-                best_mse = mse
+                raise optuna.TrialPruned(f"fit-failed: {exc}")
+
+            trial.report(val_loss, step=len(history.history.get("loss", [])))
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+            if val_loss < best_loss:
+                best_loss = val_loss
                 best_params = params
                 best_model = model
+
+            return val_loss
+
+        pruner = None
+        if isinstance(pruner_name, str) and pruner_name.lower() == "median":
+            pruner = optuna.pruners.MedianPruner(n_warmup_steps=int(NN_TRAINING.get("pruner_warmup", 1)))
+
+        study = optuna.create_study(direction="minimize", pruner=pruner, sampler=optuna.samplers.TPESampler(seed=int(RANDOM_SEED)))
+        study.optimize(objective, n_trials=n_trials)
 
         if best_model is None:
             raise RuntimeError("Failed to fit any NeuralNetworkWithEmbeddings models during tuning.")
 
         self.tuned_params = best_params
         self.model = best_model
+        # `X_train` already has the target column removed above, so just
+        # record its columns directly instead of attempting to drop again.
         self.feature_columns = X_train.columns.tolist()
-        print(f"NeuralNetworkWithEmbeddings tuning complete. Best MSE={best_mse:.6f}, params={best_params}")
+        print(f"NeuralNetworkWithEmbeddings tuning complete. Best val_loss={best_loss:.6f}, params={best_params}")
 
     def train_final(self) -> None:
         combined = pd.concat([self.train_df, self.val_df], axis=0)

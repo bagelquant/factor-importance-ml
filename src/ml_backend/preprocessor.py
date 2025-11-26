@@ -105,5 +105,12 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     # Step 6: Fill any remaining missing values with 0
     print("Preprocessing: Filling remaining missing values with 0...")
     df = df.fillna(0)
+    
+    # modify all float64 to float32 to save memory
+    float_cols = df.select_dtypes(include=['float64']).columns
+    df[float_cols] = df[float_cols].astype(np.float32)
+    # bool columns to int8
+    bool_cols = df.select_dtypes(include=['bool']).columns
+    df[bool_cols] = df[bool_cols].astype(np.int8)
     return df.sort_index()
 

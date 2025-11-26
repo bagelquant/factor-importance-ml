@@ -1,5 +1,7 @@
 # python==3.12.7
-tensorflow
+# tensorflow macos
+tensorflow-metal
+tensorflow-macos
 numpy
 pandas
 scikit-learn
