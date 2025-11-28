@@ -649,6 +649,11 @@ class NeuralNetworkWithEmbeddings(BaseModel):
     feature_columns: list = field(init=False, repr=False, default_factory=list)
     _permno_mapping: dict = field(init=False, repr=False, default_factory=dict)
 
+    # Stores learned embedding matrices for inspection/analysis
+    # after tuning and after final training respectively.
+    best_train_embedding_vectors: Optional[pd.DataFrame] = field(init=False, default=None, repr=False)
+    combined_train_val_embedding_vectors: Optional[pd.DataFrame] = field(init=False, default=None, repr=False)
+
     def _get_permnos(self, df: pd.DataFrame) -> pd.Series:
         # Try to extract `permno` from index first, then from columns.
         if isinstance(df.index, pd.MultiIndex) and "permno" in df.index.names:
@@ -665,7 +670,7 @@ class NeuralNetworkWithEmbeddings(BaseModel):
 
         numeric_input = keras.Input(shape=(input_dim,), name="numeric_input")
         permno_input = keras.Input(shape=(1,), dtype="int32", name="permno_input")
-        embed = layers.Embedding(input_dim=n_permnos, output_dim=embedding_dim, input_length=1)(permno_input)
+        embed = layers.Embedding(input_dim=n_permnos, output_dim=embedding_dim, input_length=1, name="permno_embedding")(permno_input)
         embed = layers.Flatten()(embed)
         x = layers.Concatenate()([numeric_input, embed])
         for _ in range(hidden_layers):
@@ -674,6 +679,36 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         model = keras.Model(inputs=[numeric_input, permno_input], outputs=out)
         model.compile(optimizer=cast(Any, keras.optimizers.Adam(learning_rate=lr)), loss="mse")
         return model
+
+    def _extract_embedding_df(self, model: "keras.Model") -> pd.DataFrame:
+        """Return embedding matrix as DataFrame indexed by permno.
+
+        Assumes the embedding layer is named "permno_embedding" and that
+        `self._permno_mapping` maps permno -> embedding index.
+        """
+        try:
+            emb_layer = model.get_layer("permno_embedding")
+        except Exception:
+            raise RuntimeError("Embedding layer 'permno_embedding' not found in model.")
+
+        weights = emb_layer.get_weights()
+        if not weights:
+            raise RuntimeError("Embedding layer has no weights.")
+
+        emb_matrix = weights[0]
+        # build reverse mapping from index to permno
+        index_to_permno = {idx: perm for perm, idx in self._permno_mapping.items()}
+        permnos = []
+        rows = []
+        for idx in range(emb_matrix.shape[0]):
+            permno = index_to_permno.get(idx)
+            if permno is None:
+                # index without explicit permno (e.g., unknown bucket); skip
+                continue
+            permnos.append(permno)
+            rows.append(emb_matrix[idx])
+
+        return pd.DataFrame(rows, index=pd.Index(permnos, name="permno"))
 
     def auto_tune(self) -> None:
         """Use Optuna to tune embedding NN with pruning support.
@@ -825,6 +860,13 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         # `X_train` already has the target column removed above, so just
         # record its columns directly instead of attempting to drop again.
         self.feature_columns = X_train.columns.tolist()
+
+        # Store embedding matrix learned on training data for the best model
+        try:
+            self.best_train_embedding_vectors = self._extract_embedding_df(best_model)
+        except Exception:
+            self.best_train_embedding_vectors = None
+
         print(f"NeuralNetworkWithEmbeddings tuning complete. Best val_loss={best_loss:.6f}, params={best_params}")
 
     def train_final(self) -> None:
@@ -872,6 +914,13 @@ class NeuralNetworkWithEmbeddings(BaseModel):
 
         self.model = model
         self.tuned_params = params
+
+        # Store embedding matrix after training on combined train+val
+        try:
+            self.combined_train_val_embedding_vectors = self._extract_embedding_df(model)
+        except Exception:
+            self.combined_train_val_embedding_vectors = None
+
         print(f"NeuralNetworkWithEmbeddings final training complete. Params={params}")
 
     def predict(self) -> pd.Series:
@@ -887,105 +936,3 @@ class NeuralNetworkWithEmbeddings(BaseModel):
 
         preds = cast(Any, self.model).predict([X_test.to_numpy(), p_test]).ravel()
         return pd.Series(preds, index=self.test_df.index, name=f"{self.target_col}_pred")
-
-    def distance_weighted_feature(self, bandwidth: Optional[float] = None) -> pd.DataFrame:
-        """Compute peer-weighted features for the combined train+val set.
-
-        - Uses `train_df` + `val_df` concatenated as the input DataFrame.
-        - Computes peer-weighted averages for all numeric columns (excluding
-          the target column) per cross-section date using embedding similarities.
-        - Operates per-date with vectorized matrix operations for efficiency.
-
-        Returns a DataFrame with the same index and columns as the input (numeric
-        columns replaced by their peer-weighted values; non-numeric columns are
-        copied through).
-        """
-        if getattr(self, "model", None) is None:
-            raise RuntimeError("Model is not trained. Call `train_final()` or `auto_tune()` first.")
-
-        # Build the DataFrame from train + val (preferred) or fallback to test
-        try:
-            df = pd.concat([self.train_df, self.val_df], axis=0)
-        except Exception:
-            df = self.test_df
-
-        # find embedding layer
-        emb_layer = None
-        m = cast(Any, self.model)
-        for layer in m.layers:
-            if layer.__class__.__name__ == "Embedding":
-                emb_layer = layer
-                break
-        if emb_layer is None:
-            raise RuntimeError("Embedding layer not found in the trained model.")
-
-        emb_weights = emb_layer.get_weights()[0]  # (n_permnos, emb_dim)
-
-        # select numeric columns (exclude target)
-        exclude = {self.target_col}
-        numeric_cols = [c for c in df.columns if c not in exclude and pd.api.types.is_numeric_dtype(df[c])]
-        if not numeric_cols:
-            raise ValueError("No numeric columns found in train+val to compute peer features.")
-
-        # extract date index for grouping (support MultiIndex with 'date' level or a 'date' column)
-        if isinstance(df.index, pd.MultiIndex) and "date" in df.index.names:
-            dates = df.index.get_level_values("date")
-        elif "date" in df.columns:
-            dates = df["date"].to_numpy()
-        else:
-            raise ValueError("DataFrame must contain a 'date' level in the index or a 'date' column for cross-sectional grouping.")
-
-        permnos = self._get_permnos(df)
-        mapped = np.array([self._permno_mapping.get(int(x), 0) for x in permnos])
-
-        unique_dates = pd.Index(dates).unique()
-        n = len(df)
-        m_cols = len(numeric_cols)
-        result = np.full((n, m_cols), np.nan, dtype=float)
-
-        for d in unique_dates:
-            # boolean mask for this date
-            if isinstance(d, np.ndarray):
-                mask = (dates == d)
-            else:
-                mask = (dates == d)
-            idx = np.nonzero(mask)[0]
-            k = idx.size
-            if k <= 1:
-                continue
-
-            emb_sub = emb_weights[mapped[idx]]  # (k, emb_dim)
-            norms = np.sum(emb_sub * emb_sub, axis=1)
-            D2 = norms[:, None] + norms[None, :] - 2.0 * (emb_sub @ emb_sub.T)
-            D2 = np.maximum(D2, 0.0)
-
-            # choose bandwidth per date if not provided
-            if bandwidth is None:
-                nonzero = D2[D2 > 0]
-                bw = float(np.sqrt(np.median(nonzero))) if nonzero.size > 0 else 1.0
-                if bw == 0.0:
-                    bw = 1.0
-            else:
-                bw = float(bandwidth)
-
-            # Gaussian kernel from squared distances (avoid extra sqrt)
-            K = np.exp(- D2 / (2.0 * (bw ** 2)))
-            np.fill_diagonal(K, 0.0)
-
-            row_sums = K.sum(axis=1)
-
-            q_sub_all = df.iloc[idx][numeric_cols].to_numpy(dtype=float)  # (k, m_cols)
-
-            # weighted sums: (k,k) @ (k,m_cols) -> (k,m_cols)
-            weighted = K @ q_sub_all
-
-            nonzero_mask = row_sums > 0
-            if nonzero_mask.any():
-                weighted[nonzero_mask] = weighted[nonzero_mask] / row_sums[nonzero_mask][:, None]
-
-            result[idx, :] = weighted
-
-        # construct output DataFrame preserving non-numeric columns
-        out_df = df.copy()
-        out_df[numeric_cols] = pd.DataFrame(result, index=df.index, columns=numeric_cols)
-        return out_df

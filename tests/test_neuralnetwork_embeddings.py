@@ -63,12 +63,46 @@ def test_neuralnetwork_embeddings_basic_flow():
     # predictions should have the same index as test
     assert preds.index.equals(test.index)
 
-    # peer-weighted features using embedding distances (new API: no args)
-    peer_df = nn.distance_weighted_feature()
-    assert isinstance(peer_df, pd.DataFrame)
-    # output index should correspond to train + val concatenation (we compute on train+val)
+
+def test_extract_embedding_df_after_auto_tune_and_train_final():
+    """_extract_embedding_df should return a DataFrame indexed by permno.
+
+    We validate that after auto_tune and train_final the helper has
+    produced non-empty DataFrames whose indices match the permnos seen
+    during training/combined train+val.
+    """
+    train = make_panel_data(n_rows=40, n_features=3, seed=10)
+    val = make_panel_data(n_rows=20, n_features=3, seed=11)
+    test = make_panel_data(n_rows=10, n_features=3, seed=12)
+
+    hyperparams = {
+        "embedding_dims": [4],
+        "hidden_layers": [1],
+        "neurons_per_layer": [8],
+        "activation_functions": ["relu"],
+        "learning_rates": [0.01],
+        "batch_sizes": [8],
+    }
+
+    nn = NeuralNetworkWithEmbeddings(train_df=train, val_df=val, test_df=test, hyperparams=hyperparams)
+
+    nn.auto_tune()
+    # best_train_embedding_vectors should be set and indexed by permno
+    assert nn.best_train_embedding_vectors is not None
+    emb_df = nn.best_train_embedding_vectors
+    assert isinstance(emb_df, pd.DataFrame)
+    assert emb_df.index.name == "permno"
+    # All permnos from training should be present in the index
+    train_permnos = pd.Index(train.index.get_level_values("permno")).unique()
+    assert set(train_permnos).issubset(set(emb_df.index))
+
+    # Now train_final and check combined_train_val_embedding_vectors
+    nn.tuned_params["epochs"] = 2
+    nn.train_final()
+    assert nn.combined_train_val_embedding_vectors is not None
+    comb_emb_df = nn.combined_train_val_embedding_vectors
+    assert isinstance(comb_emb_df, pd.DataFrame)
+    assert comb_emb_df.index.name == "permno"
     combined = pd.concat([train, val], axis=0)
-    assert peer_df.index.equals(combined.index)
-    # expect the target column to be present and have at least one non-NaN value
-    assert "retadj_next" in peer_df.columns
-    assert peer_df["retadj_next"].notna().any()
+    combined_permnos = pd.Index(combined.index.get_level_values("permno")).unique()
+    assert set(combined_permnos).issubset(set(comb_emb_df.index))

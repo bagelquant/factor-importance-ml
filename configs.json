@@ -1,8 +1,11 @@
 {
+
     "file_path": {
         "raw_data": "data/raw/OpenAP_Macro.parquet.gzip",
         "processed_data": "data/processed/processed_data.parquet.gzip"
     },
+
+
     "hyperparameters": {
         "random_seed": 666,
         "ElasticNet": {
@@ -16,13 +19,13 @@
         },
     "NeuralNetwork": {
         "hidden_layers": [2, 3, 4],
-        "neurons_per_layer": [16, 32],
+        "neurons_per_layer": [32, 64],
         "activation_functions": ["relu"],
         "learning_rates": [0.01],
-        "batch_sizes": [2048]
+        "batch_sizes": [1024]
         },
     "NeuralNetworkTraining": {
-        "final_epochs": 50,
+        "final_epochs": 100,
         "use_early_stopping": true,
         "early_stopping_patience": 10,
         "# Tuning (Optuna) settings": "These control Optuna tuning behavior for NeuralNetwork classes",
@@ -37,9 +40,11 @@
         "inter_op_threads": 2
         },
     "NeuralNetworkWithEmbeddings": {
-        "embedding_dims": [8]
+        "embedding_dims": [100]
         }
     },
+
+
     "train_iteration": {
         "train_start": 2000,
         "val_start": 2006,
