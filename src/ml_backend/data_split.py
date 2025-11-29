@@ -18,6 +18,7 @@ In other words,
 import json
 import pandas as pd
 
+__all__ = ["split_data"]
 
 # Configuration parameters
 with open("configs.json", "r") as f:  # type: ignore

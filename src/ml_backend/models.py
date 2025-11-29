@@ -154,15 +154,31 @@ class BaseModel(ABC):
     hyperparams: dict[str, list] = field(default_factory=dict)
     tuned_params: dict[str, object] = field(init=False, default_factory=dict)
     target_col: str = "retadj_next"
+    
+    # Optional datasets for final training (e.g. with embeddings trained on train+val)
+    train_df_final: Optional[pd.DataFrame] = field(default=None, repr=False)
+    val_df_final: Optional[pd.DataFrame] = field(default=None, repr=False)
+    # Optional dataset for final prediction
+    test_df_final: Optional[pd.DataFrame] = field(default=None, repr=False)
 
     model: object = field(init=False, repr=False)
 
     def __post_init__(self):
         # Verify target column exists
-        for df, name in zip(
-            [self.train_df, self.val_df, self.test_df],
-            ["train_df", "val_df", "test_df"]
-        ):
+        dfs_to_check = [self.train_df, self.val_df, self.test_df]
+        names_to_check = ["train_df", "val_df", "test_df"]
+        
+        if self.train_df_final is not None:
+            dfs_to_check.append(self.train_df_final)
+            names_to_check.append("train_df_final")
+        if self.val_df_final is not None:
+            dfs_to_check.append(self.val_df_final)
+            names_to_check.append("val_df_final")
+        if self.test_df_final is not None:
+            dfs_to_check.append(self.test_df_final)
+            names_to_check.append("test_df_final")
+
+        for df, name in zip(dfs_to_check, names_to_check):
             if self.target_col not in df.columns:
                 raise ValueError(f"Target column '{self.target_col}' not found in {name} columns.")
 
@@ -263,14 +279,18 @@ class ElasticNet(BaseModel):
         Train the final ElasticNet model on `train_df` + `val_df`.
 
         Behavior:
-        - Concatenates `train_df` and `val_df` and fits a pipeline
-          (`StandardScaler` -> `SkElasticNet`) using `self.tuned_params` if
+        - Concatenates `train_df` and `val_df` (or `train_df_final` and `val_df_final` if provided)
+          and fits a pipeline (`StandardScaler` -> `SkElasticNet`) using `self.tuned_params` if
           available, otherwise uses the first value from each hyperparameter list.
         - Stores the fitted pipeline in `self.model` and records feature
           column order in `self.feature_columns` for prediction alignment.
         """
+        # Use final datasets if provided, else standard
+        t_df = self.train_df_final if self.train_df_final is not None else self.train_df
+        v_df = self.val_df_final if self.val_df_final is not None else self.val_df
+
         # Concatenate training and validation data for final training
-        combined = pd.concat([self.train_df, self.val_df], axis=0)
+        combined = pd.concat([t_df, v_df], axis=0)
         X = combined.drop(columns=[self.target_col]).copy()
         y = combined[self.target_col]
 
@@ -305,14 +325,16 @@ class ElasticNet(BaseModel):
 
     def predict(self) -> pd.Series:
         """
-        Predict using the trained ElasticNet pipeline on `test_df`.
+        Predict using the trained ElasticNet pipeline on `test_df` (or `test_df_final`).
 
-        Returns a `pd.Series` of predictions indexed the same as `test_df`.
+        Returns a `pd.Series` of predictions indexed the same as the test dataframe.
         """
         if getattr(self, "model", None) is None:
             raise RuntimeError("Model is not trained. Call `train_final()` or `auto_tune()` first.")
+        
+        target_df = self.test_df_final if self.test_df_final is not None else self.test_df
 
-        X_test = self.test_df.drop(columns=[self.target_col]).copy()
+        X_test = target_df.drop(columns=[self.target_col]).copy()
 
         # If we stored feature columns during training, reindex test accordingly
         # Reindex test features to training feature order
@@ -324,7 +346,7 @@ class ElasticNet(BaseModel):
         if predict_fn is None:
             raise RuntimeError("Trained model does not expose a 'predict' method.")
         preds = predict_fn(X_test.to_numpy())
-        return pd.Series(preds, index=self.test_df.index, name=f"{self.target_col}_pred")
+        return pd.Series(preds, index=target_df.index, name=f"{self.target_col}_pred")
 
 
 @dataclass(slots=True)
@@ -399,8 +421,12 @@ class GradientBoostingTree(BaseModel):
         print(f"GradientBoostingTree tuning complete. Best MSE={best_mse:.6f}, params={best_params}")
 
     def train_final(self) -> None:
+        # Use final datasets if provided, else standard
+        t_df = self.train_df_final if self.train_df_final is not None else self.train_df
+        v_df = self.val_df_final if self.val_df_final is not None else self.val_df
+
         # Train final model on train + val
-        combined = pd.concat([self.train_df, self.val_df], axis=0)
+        combined = pd.concat([t_df, v_df], axis=0)
         X = combined.drop(columns=[self.target_col]).copy()
         y = combined[self.target_col]
 
@@ -422,8 +448,10 @@ class GradientBoostingTree(BaseModel):
     def predict(self) -> pd.Series:
         if getattr(self, "model", None) is None:
             raise RuntimeError("Model is not trained. Call `train_final()` or `auto_tune()` first.")
+        
+        target_df = self.test_df_final if self.test_df_final is not None else self.test_df
 
-        X_test = self.test_df.drop(columns=[self.target_col]).copy()
+        X_test = target_df.drop(columns=[self.target_col]).copy()
         if getattr(self, "feature_columns", None):
             X_test = X_test.reindex(columns=self.feature_columns)
 
@@ -431,7 +459,7 @@ class GradientBoostingTree(BaseModel):
         if predict_fn is None:
             raise RuntimeError("Trained model does not expose a 'predict' method.")
         preds = predict_fn(X_test.to_numpy())
-        return pd.Series(preds, index=self.test_df.index, name=f"{self.target_col}_pred")
+        return pd.Series(preds, index=target_df.index, name=f"{self.target_col}_pred")
 
 
 @dataclass(slots=True)
@@ -591,8 +619,12 @@ class NeuralNetwork(BaseModel):
         print(f"NeuralNetwork tuning complete. Best val_loss={best_loss:.6f}, params={best_params}")
 
     def train_final(self) -> None:
+        # Use final datasets if provided, else standard
+        t_df = self.train_df_final if self.train_df_final is not None else self.train_df
+        v_df = self.val_df_final if self.val_df_final is not None else self.val_df
+
         # Train final NN on train + val using tuned params (or defaults)
-        combined = pd.concat([self.train_df, self.val_df], axis=0)
+        combined = pd.concat([t_df, v_df], axis=0)
         X = combined.drop(columns=[self.target_col]).copy()
         y = combined[self.target_col]
 
@@ -620,9 +652,9 @@ class NeuralNetwork(BaseModel):
         if use_es:
             patience = int(cast(Any, NN_TRAINING.get("early_stopping_patience", 10)))
             callbacks = [keras.callbacks.EarlyStopping(monitor="val_loss", patience=patience, restore_best_weights=True)]
-            # Use val_df as validation_data (it's okay if val_df is also part of combined)
-            X_val = self.val_df.drop(columns=[self.target_col]).copy()
-            y_val = self.val_df[self.target_col]
+            # Use the selected v_df as validation_data
+            X_val = v_df.drop(columns=[self.target_col]).copy()
+            y_val = v_df[self.target_col]
             model.fit(X.to_numpy(), y.to_numpy(), epochs=epochs, batch_size=batch_size, verbose=cast(Any, 0), validation_data=(X_val.to_numpy(), y_val.to_numpy()), callbacks=callbacks)
         else:
             model.fit(X.to_numpy(), y.to_numpy(), epochs=epochs, batch_size=batch_size, verbose=cast(Any, 0))
@@ -634,13 +666,15 @@ class NeuralNetwork(BaseModel):
     def predict(self) -> pd.Series:
         if getattr(self, "model", None) is None:
             raise RuntimeError("Model is not trained. Call `train_final()` or `auto_tune()` first.")
+            
+        target_df = self.test_df_final if self.test_df_final is not None else self.test_df
 
-        X_test = self.test_df.drop(columns=[self.target_col]).copy()
+        X_test = target_df.drop(columns=[self.target_col]).copy()
         if getattr(self, "feature_columns", None):
             X_test = X_test.reindex(columns=self.feature_columns)
 
         preds = cast(Any, self.model).predict(X_test.to_numpy()).ravel()
-        return pd.Series(preds, index=self.test_df.index, name=f"{self.target_col}_pred")
+        return pd.Series(preds, index=target_df.index, name=f"{self.target_col}_pred")
 
 
 @dataclass(slots=True)
@@ -727,7 +761,8 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         permnos_val = self._get_permnos(self.val_df)
 
         unique_permnos = pd.Index(permnos_train.unique())
-        self._permno_mapping = {int(p): i for i, p in enumerate(unique_permnos)}
+        # Reserve index 0 for OOV; start mapping at 1
+        self._permno_mapping = {int(p): i + 1 for i, p in enumerate(unique_permnos)}
 
         def map_permno_array(s: pd.Series) -> np.ndarray:
             return np.array([self._permno_mapping.get(int(x), 0) for x in s])
@@ -758,7 +793,8 @@ class NeuralNetworkWithEmbeddings(BaseModel):
 
             try:
                 embedding_dim = int(cast(Any, params.get("embedding_dims", 8)))
-                model = self._build_embedding_model(X_train_num.shape[1], len(unique_permnos), embedding_dim, params)
+                # Vocabulary size = len(unique) + 1 (for OOV at index 0)
+                model = self._build_embedding_model(X_train_num.shape[1], len(unique_permnos) + 1, embedding_dim, params)
                 batch_size = int(cast(Any, params.get("batch_sizes", 32)))
 
                 callbacks = []
@@ -877,7 +913,8 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         # permno mapping from combined dataset ensures we have IDs for all seen permnos
         permnos_combined = self._get_permnos(pd.concat([self.train_df, self.val_df], axis=0))
         unique_permnos = pd.Index(permnos_combined.unique())
-        self._permno_mapping = {int(p): i for i, p in enumerate(unique_permnos)}
+        # Reserve index 0 for OOV (unknown permnos); start mapping at 1
+        self._permno_mapping = {int(p): i + 1 for i, p in enumerate(unique_permnos)}
 
         def map_permno_array_series(s: pd.Series) -> np.ndarray:
             return np.array([self._permno_mapping.get(int(x), 0) for x in s])
@@ -894,7 +931,8 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         epochs = int(cast(Any, NN_TRAINING.get("final_epochs", 100)))
         batch_size = int(cast(Any, params.get("batch_sizes", 32)))
 
-        model = self._build_embedding_model(X.shape[1], len(unique_permnos), embedding_dim, params)
+        # Vocabulary size = len(unique) + 1 (for OOV at index 0)
+        model = self._build_embedding_model(X.shape[1], len(unique_permnos) + 1, embedding_dim, params)
 
         use_es = bool(NN_TRAINING.get("use_early_stopping", False))
         if use_es:
@@ -926,13 +964,15 @@ class NeuralNetworkWithEmbeddings(BaseModel):
     def predict(self) -> pd.Series:
         if getattr(self, "model", None) is None:
             raise RuntimeError("Model is not trained. Call `train_final()` or `auto_tune()` first.")
+            
+        target_df = self.test_df_final if self.test_df_final is not None else self.test_df
 
-        X_test = self.test_df.drop(columns=[self.target_col]).copy()
+        X_test = target_df.drop(columns=[self.target_col]).copy()
         if getattr(self, "feature_columns", None):
             X_test = X_test.reindex(columns=self.feature_columns)
 
-        permnos_test = self._get_permnos(self.test_df)
+        permnos_test = self._get_permnos(target_df)
         p_test = np.array([self._permno_mapping.get(int(x), 0) for x in permnos_test])
 
         preds = cast(Any, self.model).predict([X_test.to_numpy(), p_test]).ravel()
-        return pd.Series(preds, index=self.test_df.index, name=f"{self.target_col}_pred")
+        return pd.Series(preds, index=target_df.index, name=f"{self.target_col}_pred")
