@@ -21,8 +21,8 @@
         "hidden_layers": [2, 3, 4],
         "neurons_per_layer": [32, 64],
         "activation_functions": ["relu"],
-        "learning_rates": [0.01],
-        "batch_sizes": [1024]
+        "learning_rates": [0.001],
+        "batch_sizes": [256]
         },
     "NeuralNetworkTraining": {
         "final_epochs": 100,
@@ -46,10 +46,8 @@
 
 
     "train_iteration": {
-        "train_start": 2000,
-        "val_start": 2006,
-        "val_years": 3,
-        "test_years": 1,
-        "test_end": 2020
+        "data_start": 2000,
+        "test_end": 2020,
+        "val_years": 3
     }
 }

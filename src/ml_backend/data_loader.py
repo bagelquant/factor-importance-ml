@@ -47,6 +47,13 @@ def _get_raw_data_path() -> Path:
     raw_data_path = Path(config["raw_data"])
     return raw_data_path
 
+def _get_data_start() -> int:
+    """Get the whole process start year, for all iterations."""
+    with open(CONFIG_PATH, "r") as f:  # type: ignore
+        config = json.load(f)["train_iteration"]
+    train_start = config["data_start"]
+    return train_start
+
 
 def load_raw(file_path: Path=_get_raw_data_path()) -> pd.DataFrame:
     """Load raw data from the specified file path.
@@ -71,6 +78,10 @@ def load_raw(file_path: Path=_get_raw_data_path()) -> pd.DataFrame:
 
     # drop duplicate indices if any
     df = df.loc[~df.index.duplicated(keep="first")]
+
+    # select data from data_start year onwards
+    data_start = _get_data_start()
+    df = df.loc[df.index.get_level_values("date").year >= data_start]
     return df
 
 
