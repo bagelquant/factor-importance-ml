@@ -19,7 +19,7 @@ from joblib import Parallel, delayed
 from .preprocessor import preprocess
 
 
-__all__ = ["load_raw", "load_processed", "load_train_ready_data", "add_peer_based_features"]
+__all__ = ["load_raw", "load_processed", "load_train_ready_data", "add_peer_based_features", "load_train_ready_data_no_peer"]
 
 # Locate `configs.json` by searching upward from this module so a repo-root
 # `configs.json` (e.g. `/.../ml_project/configs.json`) is found even when the
@@ -449,6 +449,41 @@ def load_train_ready_data(test_year: int) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     return train_embeddings, train_plus_val_embeddings
                           
+
+def load_train_ready_data_no_peer(test_year: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load data set ready for training for a specific year (No Peer Features).
+    
+    Output one: dataset with train only embeddings (used for validation)
+    Output two: dataset with train + val embeddings (used for final training + prediction)
+    """
+    preprocessed_data = load_processed()
+    # slice date index from data_start to test_year
+    preprocessed_data = preprocessed_data.loc[
+            preprocessed_data.index.get_level_values("date").year <= test_year  # type: ignore
+    ]
+
+    path_train_embed = Path(f"data/embeddings/train_embeddings_{test_year}.parquet.gzip")
+    train_embeddings = pd.read_parquet(path_train_embed)
+
+    # concatenate embeddings to preprocessed data
+    train_embeddings = _cat_embeddings(
+        base_data=preprocessed_data,
+        embeddings=train_embeddings
+    )
+
+    path_train_val_embed = Path(f"data/embeddings/train_val_embeddings_{test_year}.parquet.gzip")
+    train_plus_val_embeddings = pd.read_parquet(path_train_val_embed)
+
+    # concatenate embeddings to preprocessed data
+    train_plus_val_embeddings = _cat_embeddings(
+        base_data=preprocessed_data,
+        embeddings=train_plus_val_embeddings
+    )
+
+    return train_embeddings, train_plus_val_embeddings
+
+
 if __name__ == "__main__":
     from time import perf_counter
     start = perf_counter()
