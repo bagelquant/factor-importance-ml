@@ -22,6 +22,10 @@ import pandas as pd
 from pathlib import Path
 from src.ml_backend import load_train_ready_data, split_data, ElasticNet
 
+# ignore warnings for cleaner output
+import warnings
+warnings.filterwarnings("ignore")
+
 # time tracking
 start_time = time.perf_counter()
 
@@ -74,7 +78,9 @@ for year in range(2009, test_end + 1):
     )
 
     print("Auto-tuning...")
-    model.auto_tune() 
+    # model.auto_tune() 
+    print("Set hypyerparameters manually for faster execution...")
+    model.tuned_params = {'alpha': 0.001, 'l1_ratio': 0.99}  
     
     print("Final training...")
     model.train_final() 

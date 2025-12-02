@@ -23,6 +23,10 @@ from src.ml_backend import load_train_ready_data_no_peer, split_data, ElasticNet
 # time tracking
 start_time = time.perf_counter()
 
+# ignore warnings
+import warnings
+warnings.filterwarnings("ignore")
+
 # %% 
 # Read configuration parameters
 with open("configs.json", "r") as f:

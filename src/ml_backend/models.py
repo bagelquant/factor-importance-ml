@@ -693,7 +693,7 @@ class NeuralNetworkWithEmbeddings(BaseModel):
         if isinstance(df.index, pd.MultiIndex) and "permno" in df.index.names:
             return pd.Series(df.index.get_level_values("permno"), index=df.index)
         if "permno" in df.columns:
-            return df["permno"].astype(int)
+            return df["permno"].astype(int)  # type: ignore
         raise ValueError("permno not found in index levels or columns; required for embeddings.")
 
     def _build_embedding_model(self, input_dim: int, n_permnos: int, embedding_dim: int, params: dict) -> "keras.Model":
